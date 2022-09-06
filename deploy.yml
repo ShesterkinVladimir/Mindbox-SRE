@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+spec:
+  replicas: 3 # для максимальной отказоустойчивости будем использовать 3 пода (потому что 3 ноды)
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate # Сначала 1 под добавляем, потом старый убиваем, чтобы избежать даунтайма 
+  selector:
+    matchLabels:
+      run: test-app
+  template:
+    metadata:
+      labels:
+        run: test-app
+    spec:
+      affinity: 
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution: # Правило "мягкое" т.к. ноды 3, а пода может быть 4
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: run
+                  operator: In
+                  values:
+                  - test-app # ищем поды с лейблом run: test-app
+              topologyKey: topology.kubernetes.io/zone
+
+      containers:
+      - name: test-app
+        image: registry/app:v1
+        ports:
+        - containerPort: 80
+
+        startupProbe:
+          httpGet:
+            path: /
+            port: 80
+          failureThreshold: 3
+          periodSeconds: 5 # даем приложению 15 секунд на запуск (нужно 5-10 сек)
+
+        readinessProbe: 
+          failureThreshold: 2 # если под отвалится, то через 10 секунд отключаем от него трафик
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 5  
+          successThreshold: 1
+          timeoutSeconds: 1
+          initialDelaySeconds: 5 # инициализация 5-10 секунд, поэтому хотя бы 5 сек можно подождать 
+
+        livenessProbe: 
+          failureThreshold: 4 # а через еще 10 секунд (в сумме 20 сек) перезапускаем под
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 5 
+          successThreshold: 1
+          timeoutSeconds: 1
+
+        resources:
+          requests:
+            cpu: "100m" # для штатной работы приложения
+            memory: "128Mi" # по памяти требование 128МБ, столько и запросим
+          limits:
+            cpu: "1000m" # не очень понял, что значит значительно больше CPU, но решил сделать ограничение 1 
+            memory: "256Mi" # офицерский запас :)
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: test-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: test-app
+  minReplicas: 3 # максимальной отказоустойчивости будем использовать все 3 ноды  
+  maxReplicas: 4 # для пиковой нагрузки нам нужно 4 пода
+  metrics:
+  - type: Resource
+    resource:
+        name: cpu
+        targetAverageValue: "200m" # если потребление cpu в 2 раза выше штатного, но необходимо добавить поды
+  - type: Resource
+      resource:
+        name: memory
+        targetAverageValue: "200Mi" # при таком увеличении потребляемой памяти также необходимо добавить поды
+
+
+--- # поо заданию про сервис ничего не сказано, но для полноты картины пусть будет 
+apiVersion: v1
+kind: Service
+metadata:
+  name: LoadBalancer-test-app
+spec:
+  selector:
+    matchLabels:
+      run: test-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: LoadBalancer # используем LoadBalancer чтобы распределить трафик между нодами
+
